@@ -255,9 +255,10 @@ static bool IsQueryPrio( ServerQuery type )
 
 LoadProgress Worker::s_loadProgress;
 
-Worker::Worker( const char* addr, uint16_t port, int64_t memoryLimit )
+Worker::Worker( const char* addr, uint16_t port, int64_t memoryLimit, uint32_t protocolVersion )
     : m_addr( addr )
     , m_port( port )
+    , m_protocolVersion( protocolVersion )
     , m_hasData( false )
     , m_stream( LZ4_createStreamDecode() )
     , m_buffer( new char[TargetFrameSize*3 + 1] )
@@ -2757,8 +2758,7 @@ void Worker::Exec()
     std::chrono::time_point<std::chrono::high_resolution_clock> t0;
 
     m_sock.Send( HandshakeShibboleth, HandshakeShibbolethSize );
-    uint32_t protocolVersion = ProtocolVersion;
-    m_sock.Send( &protocolVersion, sizeof( protocolVersion ) );
+    m_sock.Send( &m_protocolVersion, sizeof( m_protocolVersion ) );
     HandshakeStatus handshake;
     if( !m_sock.Read( &handshake, sizeof( handshake ), 10, ShouldExit ) )
     {

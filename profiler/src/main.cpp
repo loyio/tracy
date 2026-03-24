@@ -98,6 +98,11 @@ static ResolvService resolv( port );
 static char addr[1024] = { "127.0.0.1" };
 static ConnectionHistory* connHist;
 static std::atomic<ViewShutdown> viewShutdown { ViewShutdown::False };
+
+static bool IsSupportedRemoteProtocol( uint32_t remoteProto )
+{
+    return remoteProto == tracy::ProtocolVersion || remoteProto == 76;
+}
 static double animTime = 0;
 static float dpiScale = -1.f;
 static bool dpiScaleOverriddenFromEnv = false;
@@ -1015,7 +1020,7 @@ static void DrawContents()
             std::lock_guard<std::mutex> lock( resolvLock );
             for( auto& v : clients )
             {
-                const bool badProto = v.second.protocolVersion != tracy::ProtocolVersion;
+                const bool badProto = !IsSupportedRemoteProtocol( v.second.protocolVersion );
                 bool sel = false;
                 const auto& name = resolvMap.find( v.second.address );
                 assert( name != resolvMap.end() );
@@ -1037,7 +1042,7 @@ static void DrawContents()
                         tracy::TextColoredUnformatted( 0xFF0000FF, "Incompatible protocol!" );
                         ImGui::SameLine();
                         auto ph = tracy::ProtocolHistory;
-                        ImGui::TextDisabled( "(used: %i, required: %i)", v.second.protocolVersion, tracy::ProtocolVersion );
+                        ImGui::TextDisabled( "(used: %i, supported: %i or 76)", v.second.protocolVersion, tracy::ProtocolVersion );
                         while( ph->protocol && ph->protocol != v.second.protocolVersion ) ph++;
                         if( ph->protocol )
                         {
@@ -1067,7 +1072,7 @@ static void DrawContents()
                 }
                 if( selected && !loadThread.joinable() )
                 {
-                    view.store( std::make_shared<tracy::View>( RunOnMainThread, v.second.address.c_str(), v.second.port, SetWindowTitleCallback, SetupScaleCallback, AttentionCallback, s_achievements ), std::memory_order_release );
+                    view.store( std::make_shared<tracy::View>( RunOnMainThread, v.second.address.c_str(), v.second.port, SetWindowTitleCallback, SetupScaleCallback, AttentionCallback, s_achievements, v.second.protocolVersion ), std::memory_order_release );
                 }
                 ImGui::NextColumn();
                 const auto acttime = ( v.second.activeTime + ( time - v.second.time ) / 1000 ) * 1000000000ll;

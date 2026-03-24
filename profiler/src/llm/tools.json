@@ -166,5 +166,80 @@
       "required": ["query"]
     }
   }
+},
+{
+  "type": "function",
+  "function": {
+    "name": "get_slow_frames",
+    "description": "Find frames that are unusually slow. Returns frame numbers, their duration in milliseconds, and how many times slower they are than the average. Use this to identify which specific frames are causing hitches or stutter.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "threshold_ms": {
+          "type": "number",
+          "description": "Report frames slower than this many milliseconds. If omitted, returns the slowest frames automatically."
+        },
+        "top_n": {
+          "type": "integer",
+          "description": "Maximum number of slow frames to return (default: 20)."
+        }
+      },
+      "required": []
+    }
+  }
+},
+{
+  "type": "function",
+  "function": {
+    "name": "get_frame_zones",
+    "description": "Get a breakdown of all instrumented zones (function calls) that executed during a specific frame, grouped by thread. Shows each zone's name, source location, duration and percentage of frame time. Use this after identifying a slow frame with get_slow_frames to find out what was taking the most time. IMPORTANT: only works on completed (disconnected) recordings, not on live sessions.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "frame": {
+          "type": "integer",
+          "description": "Frame number to analyze (as returned by get_slow_frames)."
+        },
+        "min_pct": {
+          "type": "number",
+          "description": "Only show zones that take at least this percentage of the frame time (default: 1.0). Lower values show more detail."
+        },
+        "max_depth": {
+          "type": "integer",
+          "description": "Maximum depth of the zone call tree to expand (default: 6)."
+        }
+      },
+      "required": ["frame"]
+    }
+  }
+},
+{
+  "type": "function",
+  "function": {
+    "name": "get_frame_hotspots_with_callstack",
+    "description": "Analyze one frame and return top hotspots with per-hotspot callstack snippets. Use this to quickly identify what was expensive and where it was called from. Only works on completed (disconnected) recordings.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "frame": {
+          "type": "integer",
+          "description": "Frame number to analyze."
+        },
+        "top_n": {
+          "type": "integer",
+          "description": "Maximum number of hotspots to return (default: 10)."
+        },
+        "min_pct": {
+          "type": "number",
+          "description": "Only include hotspots that take at least this percentage of frame time (default: 1.0)."
+        },
+        "max_stack_depth": {
+          "type": "integer",
+          "description": "Maximum stack frames to include per hotspot (default: 8)."
+        }
+      },
+      "required": ["frame"]
+    }
+  }
 }
 ]

@@ -9,6 +9,10 @@
 #include <time.h>
 #include <regex>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "TracyConfig.hpp"
 #include "TracyLlmApi.hpp"
 #include "TracyLlmTools.hpp"
@@ -23,6 +27,97 @@ constexpr const char* NoNetworkAccess = "Internet access is disabled by the user
 
 namespace tracy
 {
+
+static bool IsValidUtf8( const char* data, size_t len )
+{
+    size_t i = 0;
+    while( i < len )
+    {
+        const unsigned char c = (unsigned char)data[i];
+        if( c < 0x80 ) { i++; continue; }
+
+        int bytes = 0;
+        if( ( c & 0xE0 ) == 0xC0 ) bytes = 2;
+        else if( ( c & 0xF0 ) == 0xE0 ) bytes = 3;
+        else if( ( c & 0xF8 ) == 0xF0 ) bytes = 4;
+        else return false;
+
+        if( i + (size_t)bytes > len ) return false;
+        for( int j = 1; j < bytes; j++ )
+        {
+            if( ( (unsigned char)data[i + j] & 0xC0 ) != 0x80 ) return false;
+        }
+        i += bytes;
+    }
+    return true;
+}
+
+#ifdef _WIN32
+static std::string WideToUtf8( const wchar_t* wide, int wideLen )
+{
+    if( wideLen <= 0 ) return {};
+    const auto outLen = WideCharToMultiByte( CP_UTF8, 0, wide, wideLen, nullptr, 0, nullptr, nullptr );
+    if( outLen <= 0 ) return {};
+
+    std::string out( outLen, '\0' );
+    WideCharToMultiByte( CP_UTF8, 0, wide, wideLen, out.data(), outLen, nullptr, nullptr );
+    return out;
+}
+
+static std::string ConvertAnsiToUtf8( const char* data, size_t len )
+{
+    if( len == 0 ) return {};
+    const auto inLen = (int)std::min<size_t>( len, INT_MAX );
+    const auto wideLen = MultiByteToWideChar( CP_ACP, 0, data, inLen, nullptr, 0 );
+    if( wideLen <= 0 ) return std::string( data, data + len );
+
+    std::wstring wide( wideLen, L'\0' );
+    MultiByteToWideChar( CP_ACP, 0, data, inLen, wide.data(), wideLen );
+    return WideToUtf8( wide.data(), wideLen );
+}
+#endif
+
+static std::string NormalizeTextToUtf8( const char* data, size_t len )
+{
+    if( data == nullptr || len == 0 ) return {};
+
+    // UTF-8 BOM
+    if( len >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF )
+    {
+        return std::string( data + 3, data + len );
+    }
+
+#ifdef _WIN32
+    // UTF-16 LE BOM
+    if( len >= 2 && (unsigned char)data[0] == 0xFF && (unsigned char)data[1] == 0xFE )
+    {
+        const auto wptr = (const wchar_t*)( data + 2 );
+        const auto wlen = (int)( ( len - 2 ) / sizeof( wchar_t ) );
+        return WideToUtf8( wptr, wlen );
+    }
+    // UTF-16 BE BOM -> swap to LE first
+    if( len >= 2 && (unsigned char)data[0] == 0xFE && (unsigned char)data[1] == 0xFF )
+    {
+        const auto words = ( len - 2 ) / 2;
+        std::wstring wide( words, L'\0' );
+        for( size_t i = 0; i < words; i++ )
+        {
+            const auto hi = (unsigned char)data[2 + i * 2];
+            const auto lo = (unsigned char)data[2 + i * 2 + 1];
+            wide[i] = (wchar_t)( ( lo << 8 ) | hi );
+        }
+        return WideToUtf8( wide.data(), (int)wide.size() );
+    }
+#endif
+
+    if( IsValidUtf8( data, len ) ) return std::string( data, data + len );
+
+#ifdef _WIN32
+    return ConvertAnsiToUtf8( data, len );
+#else
+    return std::string( data, data + len );
+#endif
+}
 
 static std::string UrlEncode( const std::string& str )
 {
@@ -182,6 +277,26 @@ std::string TracyLlmTools::HandleToolCalls( const std::string& tool, const nlohm
             std::string empty;
             return SourceSearch( Param( "query" ), ParamOptBool( "case_insensitive", false ), ParamOptString( "path", empty ) );
         }
+        else if( tool == "get_slow_frames" )
+        {
+            double threshMs = -1.0;
+            if( json.contains( "threshold_ms" ) && !json["threshold_ms"].is_null() ) threshMs = json["threshold_ms"].get<double>();
+            const uint32_t topN = GetParamOpt<uint32_t>( json, "top_n", 20 );
+            return GetSlowFrames( threshMs, topN );
+        }
+        else if( tool == "get_frame_zones" )
+        {
+            return GetFrameZones( ParamU32( "frame" ), GetParamOpt<double>( json, "min_pct", 1.0 ), GetParamOpt<uint32_t>( json, "max_depth", 6 ) );
+        }
+        else if( tool == "get_frame_hotspots_with_callstack" )
+        {
+            return GetFrameHotspotsWithCallstack(
+                ParamU32( "frame" ),
+                GetParamOpt<uint32_t>( json, "top_n", 10 ),
+                GetParamOpt<double>( json, "min_pct", 1.0 ),
+                GetParamOpt<uint32_t>( json, "max_stack_depth", 8 )
+            );
+        }
         return "Unknown tool call: " + tool;
     }
     catch( const std::exception& e )
@@ -191,6 +306,403 @@ std::string TracyLlmTools::HandleToolCalls( const std::string& tool, const nlohm
 }
 
 #undef Param
+
+std::string TracyLlmTools::GetSlowFrames( double thresholdMs, uint32_t topN ) const
+{
+    const auto* frameData = m_worker.GetFramesBase();
+    if( !frameData ) return "Error: No frame data available. Connect to a traced application first.";
+
+    const auto frameCount = m_worker.GetFrameCount( *frameData );
+    if( frameCount < 2 ) return "Error: Not enough frames recorded yet.";
+
+    // Compute average frame time (skip first and last frame which may be partial)
+    const auto sampleCount = frameCount - 2;
+    if( sampleCount == 0 ) return "Error: Not enough complete frames to analyze.";
+
+    double totalNs = 0;
+    for( size_t i = 1; i < frameCount - 1; i++ )
+    {
+        totalNs += (double)m_worker.GetFrameTime( *frameData, i );
+    }
+    const double avgNs = totalNs / (double)sampleCount;
+    const double avgMs = avgNs / 1e6;
+
+    // Collect candidate frames
+    struct FrameInfo { size_t idx; double ms; double ratio; };
+    std::vector<FrameInfo> slow;
+    slow.reserve( 64 );
+
+    const double threshNs = ( thresholdMs > 0.0 ) ? thresholdMs * 1e6 : avgNs * 2.0;
+
+    for( size_t i = 1; i + 1 < frameCount; i++ )
+    {
+        const double ns = (double)m_worker.GetFrameTime( *frameData, i );
+        if( ns >= threshNs )
+        {
+            slow.push_back( { i, ns / 1e6, ns / avgNs } );
+        }
+    }
+
+    // Sort by duration descending, keep top_n
+    std::sort( slow.begin(), slow.end(), []( const FrameInfo& a, const FrameInfo& b ) { return a.ms > b.ms; } );
+    if( slow.size() > topN ) slow.resize( topN );
+
+    nlohmann::json result;
+    result["total_frames"] = frameCount;
+    result["average_frame_ms"] = std::round( avgMs * 100.0 ) / 100.0;
+    result["threshold_ms"] = std::round( threshNs / 1e4 ) / 100.0;
+    result["slow_frame_count"] = slow.size();
+
+    nlohmann::json frames = nlohmann::json::array();
+    for( auto& f : slow )
+    {
+        nlohmann::json entry;
+        entry["frame"] = f.idx;
+        entry["duration_ms"] = std::round( f.ms * 100.0 ) / 100.0;
+        entry["times_slower_than_avg"] = std::round( f.ratio * 10.0 ) / 10.0;
+        frames.push_back( std::move( entry ) );
+    }
+    result["frames"] = std::move( frames );
+
+    if( slow.empty() )
+    {
+        result["message"] = "No frames exceeded the threshold. All frames are within normal range.";
+    }
+    else
+    {
+        result["hint"] = "Use get_frame_zones with a frame number to see what was executing during that frame.";
+    }
+
+    return result.dump( -1, ' ', false, nlohmann::json::error_handler_t::replace );
+}
+
+// Recursive helper: walk zone tree within [frameBegin, frameEnd], append to json array.
+// zones is sorted by zone start time (Tracy invariant), enabling early-break.
+static void CollectZones( const Worker& worker,
+                          const Vector<short_ptr<ZoneEvent>>& zones,
+                          int64_t frameBegin, int64_t frameEnd,
+                          int64_t frameDuration,
+                          double minPct, uint32_t maxDepth, uint32_t depth,
+                          nlohmann::json& out )
+{
+    if( zones.is_magic() )
+    {
+        auto vec = (const Vector<ZoneEvent>*)&zones;
+        for( const auto& z : *vec )
+        {
+            const int64_t zStart = z.Start();
+            if( zStart >= frameEnd ) break;
+            if( z.IsEndValid() && z.End() <= frameBegin ) continue;
+
+            const int64_t zEnd         = worker.GetZoneEnd( z );
+            const int64_t clampedStart = std::max( zStart, frameBegin );
+            const int64_t clampedEnd   = std::min( zEnd, frameEnd );
+            if( clampedEnd <= clampedStart ) continue;
+
+            const int64_t selfNs = clampedEnd - clampedStart;
+            const double  pct    = frameDuration > 0 ? ( 100.0 * (double)selfNs / (double)frameDuration ) : 0.0;
+            if( pct < minPct ) continue;
+
+            nlohmann::json entry;
+            entry["duration_ms"]  = std::round( (double)selfNs / 1e4 ) / 100.0;
+            entry["pct_of_frame"] = std::round( pct * 10.0 ) / 10.0;
+            entry["depth"]        = depth;
+
+            const auto& srcloc = worker.GetSourceLocation( z.SrcLoc() );
+            const char* name   = worker.GetZoneName( z );
+            if( name && *name ) entry["name"] = name;
+
+            const char* file = worker.GetString( srcloc.file );
+            if( file && *file )
+            {
+                entry["file"] = file;
+                entry["line"] = srcloc.line;
+            }
+
+            if( depth < maxDepth && z.HasChildren() )
+            {
+                auto& children = worker.GetZoneChildren( z.Child() );
+                nlohmann::json childArr = nlohmann::json::array();
+                CollectZones( worker, children, frameBegin, frameEnd, frameDuration, minPct, maxDepth, depth + 1, childArr );
+                if( !childArr.empty() ) entry["children"] = std::move( childArr );
+            }
+
+            out.push_back( std::move( entry ) );
+        }
+        return;
+    }
+
+    for( auto& zPtr : zones )
+    {
+        const ZoneEvent* zRaw = zPtr.get();
+        if( !zRaw ) continue;
+
+        const auto& z = *zRaw;
+        const int64_t zStart = z.Start();
+
+        if( zStart >= frameEnd ) break;
+        if( z.IsEndValid() && z.End() <= frameBegin ) continue;
+
+        const int64_t zEnd         = worker.GetZoneEnd( z );
+        const int64_t clampedStart = std::max( zStart, frameBegin );
+        const int64_t clampedEnd   = std::min( zEnd, frameEnd );
+        if( clampedEnd <= clampedStart ) continue;
+
+        const int64_t selfNs = clampedEnd - clampedStart;
+        const double  pct    = frameDuration > 0 ? ( 100.0 * (double)selfNs / (double)frameDuration ) : 0.0;
+        if( pct < minPct ) continue;
+
+        nlohmann::json entry;
+        entry["duration_ms"]  = std::round( (double)selfNs / 1e4 ) / 100.0;
+        entry["pct_of_frame"] = std::round( pct * 10.0 ) / 10.0;
+        entry["depth"]        = depth;
+
+        const auto& srcloc = worker.GetSourceLocation( z.SrcLoc() );
+        const char* name   = worker.GetZoneName( z );
+        if( name && *name ) entry["name"] = name;
+
+        const char* file = worker.GetString( srcloc.file );
+        if( file && *file )
+        {
+            entry["file"] = file;
+            entry["line"] = srcloc.line;
+        }
+
+        if( depth < maxDepth && z.HasChildren() )
+        {
+            auto& children = worker.GetZoneChildren( z.Child() );
+            nlohmann::json childArr = nlohmann::json::array();
+            CollectZones( worker, children, frameBegin, frameEnd, frameDuration, minPct, maxDepth, depth + 1, childArr );
+            if( !childArr.empty() ) entry["children"] = std::move( childArr );
+        }
+
+        out.push_back( std::move( entry ) );
+    }
+}
+
+std::string TracyLlmTools::GetFrameZones( uint32_t frameNum, double minPct, uint32_t maxDepth )
+{
+    auto dataLock = std::lock_guard<std::mutex>( m_worker.GetDataLock() );
+
+    const auto* frameData = m_worker.GetFramesBase();
+    if( !frameData ) return "Error: No frame data available.";
+
+    // Zone timeline data is not safe to read from the LLM thread while a live capture is
+    // running: the Worker thread concurrently appends to td->timeline and the packed
+    // short_ptr reads are not atomic, leading to torn pointer dereferences and crashes.
+    // Only allow this on fully-loaded static traces (file playback or disconnected session).
+    if( !m_worker.IsDataStatic() )
+    {
+        return "Error: Zone analysis is only available on completed recordings. The profiler is currently connected to a live session. Please disconnect or stop the recording first, then ask again.";
+    }
+
+    const auto frameCount = m_worker.GetFrameCount( *frameData );
+    if( frameNum >= frameCount )
+    {
+        return "Error: Frame " + std::to_string( frameNum ) + " does not exist. Total frames: " + std::to_string( frameCount ) + ".";
+    }
+
+    const int64_t frameBegin = m_worker.GetFrameBegin( *frameData, frameNum );
+    const int64_t frameEnd   = m_worker.GetFrameEnd( *frameData, frameNum );
+    const int64_t frameDur   = frameEnd - frameBegin;
+    const double  frameMs    = (double)frameDur / 1e6;
+
+    nlohmann::json result;
+    result["frame"]       = frameNum;
+    result["duration_ms"] = std::round( frameMs * 100.0 ) / 100.0;
+    result["hint"]        = "Zones sorted by pct_of_frame descending. Only zones >= min_pct are shown.";
+
+    nlohmann::json threads = nlohmann::json::array();
+
+    for( auto* td : m_worker.GetThreadData() )
+    {
+        nlohmann::json zonesArr = nlohmann::json::array();
+        CollectZones( m_worker, td->timeline, frameBegin, frameEnd, frameDur, minPct, maxDepth, 0, zonesArr );
+
+        if( zonesArr.empty() ) continue;
+
+        // Sort top-level zones by duration descending
+        std::sort( zonesArr.begin(), zonesArr.end(), []( const nlohmann::json& a, const nlohmann::json& b ) {
+            return a.value( "duration_ms", 0.0 ) > b.value( "duration_ms", 0.0 );
+        } );
+
+        nlohmann::json threadEntry;
+        threadEntry["thread_name"] = m_worker.GetThreadName( td->id );
+        threadEntry["zones"]       = std::move( zonesArr );
+        threads.push_back( std::move( threadEntry ) );
+    }
+
+    result["threads"] = std::move( threads );
+    return result.dump( -1, ' ', false, nlohmann::json::error_handler_t::replace );
+}
+
+struct FrameHotspot
+{
+    uint64_t tid = 0;
+    const ZoneEvent* zone = nullptr;
+    int64_t durationNs = 0;
+    double pct = 0;
+};
+
+static void CollectFrameHotspots( const Worker& worker,
+                                  const Vector<short_ptr<ZoneEvent>>& zones,
+                                  int64_t frameBegin, int64_t frameEnd,
+                                  int64_t frameDuration,
+                                  double minPct,
+                                  uint64_t tid,
+                                  std::vector<FrameHotspot>& out )
+{
+    if( zones.is_magic() )
+    {
+        auto vec = (const Vector<ZoneEvent>*)&zones;
+        for( const auto& z : *vec )
+        {
+            const int64_t zStart = z.Start();
+            if( zStart >= frameEnd ) break;
+            if( z.IsEndValid() && z.End() <= frameBegin ) continue;
+
+            const int64_t zEnd = worker.GetZoneEnd( z );
+            const int64_t clampedStart = std::max( zStart, frameBegin );
+            const int64_t clampedEnd = std::min( zEnd, frameEnd );
+            if( clampedEnd <= clampedStart ) continue;
+
+            const int64_t durationNs = clampedEnd - clampedStart;
+            const double pct = frameDuration > 0 ? ( 100.0 * (double)durationNs / (double)frameDuration ) : 0.0;
+            if( pct >= minPct ) out.push_back( FrameHotspot { tid, &z, durationNs, pct } );
+
+            if( z.HasChildren() )
+            {
+                auto& children = worker.GetZoneChildren( z.Child() );
+                CollectFrameHotspots( worker, children, frameBegin, frameEnd, frameDuration, minPct, tid, out );
+            }
+        }
+        return;
+    }
+
+    for( auto& zPtr : zones )
+    {
+        const ZoneEvent* z = zPtr.get();
+        if( !z ) continue;
+
+        const int64_t zStart = z->Start();
+        if( zStart >= frameEnd ) break;
+        if( z->IsEndValid() && z->End() <= frameBegin ) continue;
+
+        const int64_t zEnd = worker.GetZoneEnd( *z );
+        const int64_t clampedStart = std::max( zStart, frameBegin );
+        const int64_t clampedEnd = std::min( zEnd, frameEnd );
+        if( clampedEnd <= clampedStart ) continue;
+
+        const int64_t durationNs = clampedEnd - clampedStart;
+        const double pct = frameDuration > 0 ? ( 100.0 * (double)durationNs / (double)frameDuration ) : 0.0;
+        if( pct >= minPct ) out.push_back( FrameHotspot { tid, z, durationNs, pct } );
+
+        if( z->HasChildren() )
+        {
+            auto& children = worker.GetZoneChildren( z->Child() );
+            CollectFrameHotspots( worker, children, frameBegin, frameEnd, frameDuration, minPct, tid, out );
+        }
+    }
+}
+
+std::string TracyLlmTools::GetFrameHotspotsWithCallstack( uint32_t frameNum, uint32_t topN, double minPct, uint32_t maxStackDepth )
+{
+    auto dataLock = std::lock_guard<std::mutex>( m_worker.GetDataLock() );
+
+    if( !m_worker.IsDataStatic() )
+    {
+        return "Error: Hotspot stack analysis is only available on completed recordings. Please disconnect or stop the recording first.";
+    }
+
+    const auto* frameData = m_worker.GetFramesBase();
+    if( !frameData ) return "Error: No frame data available.";
+
+    const auto frameCount = m_worker.GetFrameCount( *frameData );
+    if( frameNum >= frameCount )
+    {
+        return "Error: Frame " + std::to_string( frameNum ) + " does not exist. Total frames: " + std::to_string( frameCount ) + ".";
+    }
+
+    if( topN == 0 ) topN = 10;
+    if( maxStackDepth == 0 ) maxStackDepth = 8;
+
+    const int64_t frameBegin = m_worker.GetFrameBegin( *frameData, frameNum );
+    const int64_t frameEnd = m_worker.GetFrameEnd( *frameData, frameNum );
+    const int64_t frameDur = frameEnd - frameBegin;
+
+    std::vector<FrameHotspot> hotspots;
+    hotspots.reserve( 256 );
+    for( auto* td : m_worker.GetThreadData() )
+    {
+        if( !td ) continue;
+        CollectFrameHotspots( m_worker, td->timeline, frameBegin, frameEnd, frameDur, minPct, td->id, hotspots );
+    }
+
+    std::sort( hotspots.begin(), hotspots.end(), []( const auto& a, const auto& b ) { return a.durationNs > b.durationNs; } );
+    if( hotspots.size() > topN ) hotspots.resize( topN );
+
+    nlohmann::json result;
+    result["frame"] = frameNum;
+    result["duration_ms"] = std::round( (double)frameDur / 1e4 ) / 100.0;
+    result["top_n"] = topN;
+    result["min_pct"] = minPct;
+
+    nlohmann::json arr = nlohmann::json::array();
+    for( const auto& hs : hotspots )
+    {
+        if( !hs.zone ) continue;
+
+        nlohmann::json item;
+        item["duration_ms"] = std::round( (double)hs.durationNs / 1e4 ) / 100.0;
+        item["pct_of_frame"] = std::round( hs.pct * 10.0 ) / 10.0;
+        item["thread_name"] = m_worker.GetThreadName( hs.tid );
+
+        const auto& srcloc = m_worker.GetSourceLocation( hs.zone->SrcLoc() );
+        const char* zoneName = m_worker.GetZoneName( *hs.zone );
+        if( zoneName && *zoneName ) item["zone_name"] = zoneName;
+        const char* zoneFile = m_worker.GetString( srcloc.file );
+        if( zoneFile && *zoneFile )
+        {
+            item["file"] = zoneFile;
+            item["line"] = srcloc.line;
+        }
+
+        nlohmann::json stack = nlohmann::json::array();
+        if( m_worker.HasZoneExtra( *hs.zone ) )
+        {
+            const auto cs = m_worker.GetZoneExtra( *hs.zone ).callstack.Val();
+            if( cs != 0 )
+            {
+                item["callstack_id"] = cs;
+                auto& csdata = m_worker.GetCallstack( cs );
+                for( size_t i = 0; i < csdata.size() && stack.size() < maxStackDepth; i++ )
+                {
+                    const auto frameDataPtr = m_worker.GetCallstackFrame( csdata[i] );
+                    if( !frameDataPtr || frameDataPtr->size == 0 ) continue;
+
+                    const auto& frame = frameDataPtr->data[frameDataPtr->size - 1];
+                    nlohmann::json sf;
+                    const char* fname = m_worker.GetString( frame.name );
+                    const char* ffile = m_worker.GetString( frame.file );
+                    if( fname && *fname ) sf["function"] = fname;
+                    if( ffile && *ffile )
+                    {
+                        sf["file"] = ffile;
+                        sf["line"] = frame.line;
+                    }
+                    stack.push_back( std::move( sf ) );
+                }
+            }
+        }
+        item["callstack"] = std::move( stack );
+
+        arr.push_back( std::move( item ) );
+    }
+
+    result["hotspots"] = std::move( arr );
+    if( hotspots.empty() ) result["message"] = "No hotspots met the filter threshold for this frame.";
+    return result.dump( -1, ' ', false, nlohmann::json::error_handler_t::replace );
+}
 
 std::string TracyLlmTools::GetCurrentTime() const
 {
@@ -854,7 +1366,8 @@ std::string TracyLlmTools::SourceFile( const std::string& file, uint32_t line, u
     const auto data = m_worker.GetSourceFileFromCache( file.c_str() );
     if( data.data == nullptr ) return "Error: Source file not available.";
 
-    auto lines = SplitLines( data.data, data.len );
+    const auto utf8 = NormalizeTextToUtf8( data.data, data.len );
+    auto lines = SplitLines( utf8.data(), utf8.size() );
     if( line > lines.size() ) return "Error: Source file line " + std::to_string( line ) + " is out of range. The file has only " + std::to_string( lines.size() ) + " lines.";
 
     line--;
@@ -936,19 +1449,20 @@ std::string TracyLlmTools::SourceSearch( std::string query, bool caseInsensitive
 
         char* tmp = nullptr;
         auto& mem = item.second;
-        auto start = mem.data;
-        auto end = start + mem.len;
+        const auto utf8 = NormalizeTextToUtf8( mem.data, mem.len );
+        auto start = utf8.data();
+        auto end = start + utf8.size();
 
         if( caseInsensitive )
         {
-            tmp = new char[mem.len];
+            tmp = new char[utf8.size()];
             std::transform( start, end, tmp, []( char c ) { return std::tolower( c ); } );
             start = tmp;
-            end = tmp + mem.len;
+            end = tmp + utf8.size();
         }
 
         std::vector<size_t> res;
-        auto lines = SplitLines( start, mem.len );
+        auto lines = SplitLines( start, utf8.size() );
         for( size_t idx = 0; idx < lines.size(); idx++ )
         {
             if( std::regex_search( lines[idx], rx ) )
@@ -962,7 +1476,7 @@ std::string TracyLlmTools::SourceSearch( std::string query, bool caseInsensitive
         std::string r;
         if( caseInsensitive )
         {
-            auto linesOrig = SplitLines( mem.data, mem.len );
+            auto linesOrig = SplitLines( utf8.data(), utf8.size() );
             for( auto& line : res )
             {
                 r += std::to_string( line + 1 ) + " | " + linesOrig[line] + "\n";

@@ -1,4 +1,5 @@
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <curl/curl.h>
 #include <stdint.h>
@@ -184,8 +185,13 @@ void TracyLlm::Draw()
                 const char* address;
             };
             constexpr static std::array presets = {
-                Preset { "Llama.cpp", "http://localhost:8080" },
-                Preset { "LM Studio", "http://localhost:1234" },
+                Preset { "Llama.cpp",    "http://localhost:8080" },
+                Preset { "LM Studio",    "http://localhost:1234" },
+                Preset { "Ollama",       "http://localhost:11434" },
+                Preset { "OpenAI",       "https://api.openai.com" },
+                Preset { "DeepSeek",     "https://api.deepseek.com" },
+                Preset { "Groq",         "https://api.groq.com/openai" },
+                Preset { "Zhipu AI",     "https://open.bigmodel.cn/api/paas/v4" },
             };
             for( auto& preset : presets )
             {
@@ -205,13 +211,45 @@ void TracyLlm::Draw()
             QueueConnect();
         }
 
+        ImGui::AlignTextToFramePadding();
+        TextDisabledUnformatted( ICON_FA_KEY " API Key:" );
+        ImGui::SameLine();
+        {
+            char keyBuf[InputBufferSize];
+            const auto ksz = std::min<size_t>( InputBufferSize - 1, s_config.llmApiKey.size() );
+            memcpy( keyBuf, s_config.llmApiKey.c_str(), ksz );
+            keyBuf[ksz] = 0;
+            ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x );
+            if( ImGui::InputTextWithHint( "##apikey", "optional, required for cloud APIs", keyBuf, InputBufferSize, ImGuiInputTextFlags_Password ) )
+            {
+                s_config.llmApiKey = keyBuf;
+                SaveConfig();
+            }
+        }
+
         const auto& models = m_api->GetModels();
         ImGui::AlignTextToFramePadding();
         TextDisabledUnformatted( ICON_FA_COMMENTS " Chat model:" );
         ImGui::SameLine();
         if( models.empty() || m_modelIdx < 0 )
         {
-            ImGui::TextUnformatted( "No models available" );
+            if( !s_config.llmApiKey.empty() )
+            {
+                char modelBuf[512];
+                const auto msz = std::min( sizeof(modelBuf) - 1, s_config.llmModel.size() );
+                memcpy( modelBuf, s_config.llmModel.c_str(), msz );
+                modelBuf[msz] = 0;
+                ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x );
+                if( ImGui::InputTextWithHint( "##model_manual", "e.g. gpt-4o, deepseek-chat", modelBuf, sizeof(modelBuf) ) )
+                {
+                    s_config.llmModel = modelBuf;
+                    SaveConfig();
+                }
+            }
+            else
+            {
+                ImGui::TextUnformatted( "No models available" );
+            }
         }
         else
         {
@@ -247,7 +285,23 @@ void TracyLlm::Draw()
         if( !s_config.llmSeparateFastModel ) ImGui::BeginDisabled();
         if( models.empty() || m_fastIdx < 0 )
         {
-            ImGui::TextUnformatted( "No models available" );
+            if( !s_config.llmApiKey.empty() )
+            {
+                char fastModelBuf[512];
+                const auto fmsz = std::min( sizeof(fastModelBuf) - 1, s_config.llmFastModel.size() );
+                memcpy( fastModelBuf, s_config.llmFastModel.c_str(), fmsz );
+                fastModelBuf[fmsz] = 0;
+                ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x );
+                if( ImGui::InputTextWithHint( "##fastmodel_manual", "e.g. gpt-4o-mini", fastModelBuf, sizeof(fastModelBuf) ) )
+                {
+                    s_config.llmFastModel = fastModelBuf;
+                    SaveConfig();
+                }
+            }
+            else
+            {
+                ImGui::TextUnformatted( "No models available" );
+            }
         }
         else
         {
@@ -650,11 +704,11 @@ void TracyLlm::Draw()
         ImGui::SameLine();
         if( disabled )
         {
-            ImGui::TextUnformatted( "Stopping…" );
+            ImGui::TextUnformatted( "Stopping..." );
         }
         else
         {
-            ImGui::TextUnformatted( "Generating…" );
+            ImGui::TextUnformatted( "Generating..." );
         }
         s_wasActive = true;
     }
@@ -671,7 +725,7 @@ void TracyLlm::Draw()
         buttonSize.x += ImGui::GetStyle().FramePadding.x * 2.0f + ImGui::GetStyle().ItemSpacing.x;
         ImGui::PushItemWidth( ImGui::GetContentRegionAvail().x - buttonSize.x );
         if( inputChanged ) ImGui::GetInputTextState( ImGui::GetCurrentWindow()->GetID( "##chat_input" ) )->ReloadUserBufAndMoveToEnd();
-        bool send = ImGui::InputTextWithHint( "##chat_input", "Write your question here…", m_input, InputBufferSize, ImGuiInputTextFlags_EnterReturnsTrue );
+        bool send = ImGui::InputTextWithHint( "##chat_input", "Write your question here...", m_input, InputBufferSize, ImGuiInputTextFlags_EnterReturnsTrue );
         ImGui::SameLine();
         if( *m_input == 0 ) ImGui::BeginDisabled();
         send |= ImGui::Button( buttonText );
@@ -720,7 +774,7 @@ void TracyLlm::WorkerThread()
             auto callback = m_currentJob->callback;
             m_busy = true;
             lock.unlock();
-            m_api->Connect( s_config.llmAddress.c_str() );
+            m_api->Connect( s_config.llmAddress.c_str(), s_config.llmApiKey.c_str() );
             callback();
             lock.lock();
             m_busy = false;
@@ -764,6 +818,18 @@ void TracyLlm::UpdateModels()
     m_modelIdx = -1;
     m_fastIdx = -1;
     m_embedIdx = -1;
+
+    // For cloud APIs with an API key: if the server returned no model list
+    // (e.g. /v1/models is not exposed or requires auth), inject the model
+    // names the user configured manually as synthetic entries.
+    if( m_api->IsConnected() && m_api->GetModels().empty() && !s_config.llmApiKey.empty() )
+    {
+        if( !s_config.llmModel.empty() )
+            m_api->AddSyntheticModel( s_config.llmModel );
+        if( s_config.llmSeparateFastModel && !s_config.llmFastModel.empty() &&
+            s_config.llmFastModel != s_config.llmModel )
+            m_api->AddSyntheticModel( s_config.llmFastModel );
+    }
 
     auto& models = m_api->GetModels();
     auto it = std::ranges::find_if( models, []( const auto& model ) { return model.name == s_config.llmModel; } );

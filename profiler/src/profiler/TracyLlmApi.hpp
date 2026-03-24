@@ -31,11 +31,13 @@ class TracyLlmApi
 public:
     ~TracyLlmApi();
 
-    bool Connect( const char* url );
+    bool Connect( const char* url, const char* apiKey = nullptr );
     bool ChatCompletion( const nlohmann::json& req, const std::function<bool(const nlohmann::json&)>& callback, int modelIdx );
     bool Embeddings( const nlohmann::json& req, nlohmann::json& response, bool separateConnection = false );
     [[nodiscard]] int Tokenize( const std::string& text, int modelIdx );
     [[nodiscard]] nlohmann::json SendMessage( const nlohmann::json& chat, int modelIdx );
+
+    void AddSyntheticModel( const std::string& name, bool embeddings = false );
 
     [[nodiscard]] bool IsConnected() const { return m_curl != nullptr; }
     [[nodiscard]] const std::vector<LlmModel>& GetModels() const { return m_models; }
@@ -48,6 +50,7 @@ private:
 
     void* m_curl = nullptr;
     std::string m_url;
+    std::string m_apiKey;
     Type m_type;
 
     std::vector<LlmModel> m_models;

@@ -62,6 +62,9 @@ private:
     std::string SearchManual( const std::string& query, TracyLlmApi& api, bool hasEmbeddingsModel );
     std::string SourceFile( const std::string& file, uint32_t line, uint32_t context, uint32_t contextBack ) const;
     std::string SourceSearch( std::string query, bool caseInsensitive, const std::string& path ) const;
+    std::string GetSlowFrames( double thresholdMs, uint32_t topN ) const;
+    std::string GetFrameZones( uint32_t frameNum, double minPct, uint32_t maxDepth );
+    std::string GetFrameHotspotsWithCallstack( uint32_t frameNum, uint32_t topN, double minPct, uint32_t maxStackDepth );
 
     void ManualEmbeddingsWorker( TracyLlmApi& api );
 

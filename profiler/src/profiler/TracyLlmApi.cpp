@@ -32,9 +32,10 @@ void TracyLlmApi::SetupCurl( void* curl )
     curl_easy_setopt( curl, CURLOPT_USERAGENT, "Tracy Profiler" );
 }
 
-bool TracyLlmApi::Connect( const char* url )
+bool TracyLlmApi::Connect( const char* url, const char* apiKey )
 {
     m_url = url;
+    m_apiKey = apiKey ? apiKey : "";
     m_models.clear();
     if( m_curl ) curl_easy_cleanup( m_curl );
 
@@ -46,6 +47,14 @@ bool TracyLlmApi::Connect( const char* url )
     std::string buf;
     if( GetRequest( m_url + "/v1/models", buf ) != 200 )
     {
+        // With an API key configured, allow connecting anyway — cloud providers
+        // may require auth for /v1/models, or may not expose it at all.
+        // The user can manually specify model names in the Settings panel.
+        if( !m_apiKey.empty() )
+        {
+            m_type = Type::Other;
+            return true;
+        }
         curl_easy_cleanup( m_curl );
         m_curl = nullptr;
         return false;
@@ -145,6 +154,12 @@ bool TracyLlmApi::ChatCompletion( const nlohmann::json& req, const std::function
     curl_slist *hdr = nullptr;
     hdr = curl_slist_append( hdr, "Accept: application/json" );
     hdr = curl_slist_append( hdr, "Content-Type: application/json" );
+    std::string authHdrStream;
+    if( !m_apiKey.empty() )
+    {
+        authHdrStream = "Authorization: Bearer " + m_apiKey;
+        hdr = curl_slist_append( hdr, authHdrStream.c_str() );
+    }
 
     curl_easy_setopt( m_curl, CURLOPT_URL, url.c_str() );
     curl_easy_setopt( m_curl, CURLOPT_HTTPHEADER, hdr );
@@ -282,6 +297,12 @@ int64_t TracyLlmApi::GetRequest( const std::string& url, std::string& response )
     curl_slist *hdr = nullptr;
     hdr = curl_slist_append( hdr, "Accept: application/json" );
     hdr = curl_slist_append( hdr, "Content-Type: application/json" );
+    std::string authHdrGet;
+    if( !m_apiKey.empty() )
+    {
+        authHdrGet = "Authorization: Bearer " + m_apiKey;
+        hdr = curl_slist_append( hdr, authHdrGet.c_str() );
+    }
 
     curl_easy_setopt( m_curl, CURLOPT_URL, url.c_str() );
     curl_easy_setopt( m_curl, CURLOPT_HTTPHEADER, hdr );
@@ -305,6 +326,12 @@ int64_t TracyLlmApi::PostRequest( const std::string& url, const std::string& dat
     curl_slist *hdr = nullptr;
     hdr = curl_slist_append( hdr, "Accept: application/json" );
     hdr = curl_slist_append( hdr, "Content-Type: application/json" );
+    std::string authHdrPost;
+    if( !m_apiKey.empty() )
+    {
+        authHdrPost = "Authorization: Bearer " + m_apiKey;
+        hdr = curl_slist_append( hdr, authHdrPost.c_str() );
+    }
 
     auto curl = m_curl;
     if( separateConnection )
@@ -333,6 +360,11 @@ int64_t TracyLlmApi::PostRequest( const std::string& url, const std::string& dat
     curl_easy_getinfo( curl, CURLINFO_RESPONSE_CODE, &http_code );
     if( separateConnection ) curl_easy_cleanup( curl );
     return http_code;
+}
+
+void TracyLlmApi::AddSyntheticModel( const std::string& name, bool embeddings )
+{
+    m_models.emplace_back( LlmModel { .name = name, .embeddings = embeddings } );
 }
 
 }

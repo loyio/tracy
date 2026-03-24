@@ -1,5 +1,6 @@
 #include <imgui.h>
 #include <math.h>
+#include <array>
 #include <backends/imgui_impl_opengl3.h>
 #include <misc/freetype/imgui_freetype.h>
 
@@ -43,27 +44,51 @@ void LoadFonts( float scale )
     static auto fontItalic = Unembed( FontItalic );
     static auto fontEmoji = Unembed( FontEmoji );
 
+    const auto addCjkFont = [&]( float sz ) {
+#ifdef _WIN32
+        const ImWchar* cjk = io.Fonts->GetGlyphRangesChineseSimplifiedCommon();
+        ImFontConfig configCjk = configMerge;
+
+        constexpr std::array<const char*, 4> candidates = {
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/msyh.ttf",
+            "C:/Windows/Fonts/simhei.ttf",
+            "C:/Windows/Fonts/simsun.ttc",
+        };
+
+        for( auto path : candidates )
+        {
+            if( io.Fonts->AddFontFromFileTTF( path, sz, &configCjk, cjk ) != nullptr ) return;
+        }
+#endif
+    };
+
     io.Fonts->Clear();
 
     g_fonts.normal = io.Fonts->AddFontFromMemoryTTF( (void*)fontNormal->data(), fontNormal->size(), round( 15.0f * scale ), &configBasic );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontIcons->data(), fontIcons->size(), round( 14.0f * scale ), &configMerge );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontEmoji->data(), fontEmoji->size(), round( 14.0f * scale ), &configMerge );
+    addCjkFont( round( 15.0f * scale ) );
 
     g_fonts.mono = io.Fonts->AddFontFromMemoryTTF( (void*)fontFixed->data(), fontFixed->size(), round( 15.0f * scale ), &configFixed );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontIcons->data(), fontIcons->size(), round( 14.0f * scale ), &configMerge );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontEmoji->data(), fontEmoji->size(), round( 14.0f * scale ), &configMerge );
+    addCjkFont( round( 15.0f * scale ) );
 
     g_fonts.bold = io.Fonts->AddFontFromMemoryTTF( (void*)fontBold->data(), fontBold->size(), round( 15.0f * scale ), &configBasic );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontIcons->data(), fontIcons->size(), round( 14.0f * scale ), &configMerge );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontEmoji->data(), fontEmoji->size(), round( 14.0f * scale ), &configMerge );
+    addCjkFont( round( 15.0f * scale ) );
 
     g_fonts.boldItalic = io.Fonts->AddFontFromMemoryTTF( (void*)fontBoldItalic->data(), fontBoldItalic->size(), round( 15.0f * scale ), &configBasic );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontIcons->data(), fontIcons->size(), round( 14.0f * scale ), &configMerge );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontEmoji->data(), fontEmoji->size(), round( 14.0f * scale ), &configMerge );
+    addCjkFont( round( 15.0f * scale ) );
 
     g_fonts.italic = io.Fonts->AddFontFromMemoryTTF( (void*)fontItalic->data(), fontItalic->size(), round( 15.0f * scale ), &configBasic );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontIcons->data(), fontIcons->size(), round( 14.0f * scale ), &configMerge );
     io.Fonts->AddFontFromMemoryTTF( (void*)fontEmoji->data(), fontEmoji->size(), round( 14.0f * scale ), &configMerge );
+    addCjkFont( round( 15.0f * scale ) );
 
     FontNormal = round( scale * 15.f );
     FontSmall = round( scale * 15 * 2.f / 3.f );

@@ -455,7 +455,7 @@ public:
         NUM_FAILURES
     };
 
-    Worker( const char* addr, uint16_t port, int64_t memoryLimit );
+    Worker( const char* addr, uint16_t port, int64_t memoryLimit, uint32_t protocolVersion = ProtocolVersion );
     Worker( const char* name, const char* program, const std::vector<ImportEventTimeline>& timeline, const std::vector<ImportEventMessages>& messages, const std::vector<ImportEventPlots>& plots, const std::unordered_map<uint64_t, std::string>& threadNames );
     Worker( FileRead& f, EventType::Type eventMask = EventType::All, bool bgTasks = true, bool allowStringModification = false);
     ~Worker();
@@ -1002,6 +1002,7 @@ private:
     Socket m_sock;
     std::string m_addr;
     uint16_t m_port;
+    uint32_t m_protocolVersion;
 
     std::thread m_thread;
     std::thread m_threadNet;

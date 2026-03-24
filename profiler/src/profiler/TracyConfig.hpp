@@ -44,6 +44,7 @@ struct Config
     std::string llmSearchIdentifier;
     std::string llmSearchApiKey;
     std::string llmSearchBraveApiKey;
+    std::string llmApiKey;
     bool llmSeparateFastModel = true;
     bool llmAnnotateCallstacks = false;
     bool llmLimitToolReplySize = false;

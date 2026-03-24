@@ -52,6 +52,7 @@ void LoadConfig()
     if( ini_sget( ini, "llm", "limitToolReplySize", "%d", &v ) ) s_config.llmLimitToolReplySize = v;
     if( ini_sget( ini, "llm", "maxToolReplySizeValue", "%d", &v ) ) s_config.llmMaxToolReplySizeValue = v;
     if( ini_sget( ini, "llm", "separateFastModel", "%d", &v ) ) s_config.llmSeparateFastModel = v;
+    if( v2 = ini_get( ini, "llm", "apiKey" ); v2 ) s_config.llmApiKey = v2;
 
     ini_free( ini );
 }
@@ -105,6 +106,7 @@ bool SaveConfig()
     fprintf( f, "limitToolReplySize = %i\n", (int)s_config.llmLimitToolReplySize );
     fprintf( f, "maxToolReplySizeValue = %i\n", s_config.llmMaxToolReplySizeValue );
     fprintf( f, "separateFastModel = %i\n", (int)s_config.llmSeparateFastModel );
+    fprintf( f, "apiKey = %s\n", s_config.llmApiKey.c_str() );
 
     fclose( f );
     return true;
